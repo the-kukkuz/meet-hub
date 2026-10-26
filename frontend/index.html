@@ -18,6 +18,7 @@
       <div class="nav-links">
         <button class="nav-btn active" data-target="dashboard">Dashboard</button>
         <button class="nav-btn" data-target="calendar-section">Calendar</button>
+        <button class="nav-btn" data-target="knowledge">Knowledge</button>
         <button class="nav-btn" data-target="intake">Add Meeting</button>
         <button class="nav-btn" data-target="report">Report</button>
       </div>
@@ -46,7 +47,7 @@
       </div>
       <div class="input-section">
         <div class="upload-area" id="drop-zone">
-          <input type="file" id="file-input" multiple class="hidden" accept=".txt,.vtt" />
+          <input type="file" id="file-input" multiple class="hidden" accept=".txt,.vtt,.md" />
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
           <p>Drag & drop multiple files or <span>browse</span></p>
           <div id="file-list" class="file-list"></div>
@@ -84,6 +85,58 @@
           <h3 class="section-title">Raw JSON</h3>
         </div>
         <pre id="report-json"></pre>
+      </div>
+    </section>
+
+    <!-- KNOWLEDGE GRAPH & ENTITY EXPLORER VIEW -->
+    <section class="view-section hidden" id="view-knowledge">
+      <div class="view-header kg-header">
+        <div>
+          <h2 class="view-title">Knowledge Graph & Entity Explorer</h2>
+          <p class="subtitle">Navigate connected people, decisions, tasks, blockers, and verbatim transcript evidence.</p>
+        </div>
+      </div>
+
+      <!-- Controls: Filters + Search -->
+      <div class="kg-controls">
+        <div class="kg-filter-pills" id="kg-type-filters">
+          <button type="button" class="kg-pill active" data-type="">All</button>
+          <button type="button" class="kg-pill" data-type="PERSON">People</button>
+          <button type="button" class="kg-pill" data-type="DECISION">Decisions</button>
+          <button type="button" class="kg-pill" data-type="TASK">Tasks</button>
+          <button type="button" class="kg-pill" data-type="BLOCKER">Blockers</button>
+          <button type="button" class="kg-pill" data-type="MEETING">Meetings</button>
+        </div>
+        <div class="kg-search-wrapper">
+          <input 
+            type="search" 
+            id="kg-search-input" 
+            class="kg-search-input" 
+            placeholder="Search entities by name or description..." 
+            autocomplete="off"
+          />
+        </div>
+      </div>
+
+      <!-- Split Workspace -->
+      <div class="kg-workspace">
+        <!-- Left: Entity Directory -->
+        <div class="kg-entity-list-panel">
+          <div class="kg-panel-header">
+            <span>Entities</span>
+            <span id="kg-entity-count" class="kg-count-badge">0</span>
+          </div>
+          <div id="kg-entity-list" class="kg-entity-grid">
+            <div class="empty-state">Loading knowledge entities...</div>
+          </div>
+        </div>
+
+        <!-- Right: Connected Knowledge Inspector -->
+        <aside class="kg-inspector-panel" id="kg-inspector">
+          <div class="empty-state">
+            <p>Select an entity on the left to inspect its relational graph and verbatim transcript evidence.</p>
+          </div>
+        </aside>
       </div>
     </section>
 

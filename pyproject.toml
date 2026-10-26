@@ -3,7 +3,7 @@ name = "meet-hub"
 version = "0.1.0"
 description = "A Python project created with Better Fullstack"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Your Name", email = "your.email@example.com" }

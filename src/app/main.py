@@ -118,9 +118,39 @@ async def analyze_transcript_file_endpoint(file: UploadFile = File(...)):
 
 # Meeting Q&A endpoints
 @app.post("/meetings/query", response_model=MeetingQueryResponse)
-async def meeting_query_endpoint(request: MeetingQueryRequest):
-    """Answer questions based on meeting transcript context."""
-    result = answer_query(request.query, request.context)
+async def meeting_query_endpoint(request: MeetingQueryRequest, db: Session = Depends(get_db)):
+    """Answer questions based on meeting transcript context, enriched with knowledge graph facts."""
+    from app.services.knowledge_service import get_knowledge_facts_for_query, build_knowledge_evidence_context
+
+    kg_facts = get_knowledge_facts_for_query(db, request.query)
+    enhanced_context = list(request.context)
+    if kg_facts:
+        kg_context_chunk = build_knowledge_evidence_context(kg_facts)
+        if kg_context_chunk:
+            enhanced_context.insert(0, kg_context_chunk)
+
+    result = answer_query(request.query, enhanced_context)
+
+    # Append verified knowledge graph evidence quotes to source citations
+    if kg_facts:
+        existing_snippets = {
+            s["snippet"] if isinstance(s, dict) else s.snippet
+            for s in result.get("sources", [])
+        }
+        for f in kg_facts:
+            ev = f.get("evidence")
+            if ev and ev not in existing_snippets:
+                meeting_label = (
+                    f"Knowledge Graph (Meeting #{f['source_meeting_id']})"
+                    if f.get("source_meeting_id")
+                    else "Knowledge Graph"
+                )
+                result["sources"].append({
+                    "meeting": meeting_label,
+                    "snippet": ev
+                })
+                existing_snippets.add(ev)
+
     return result
 
 
@@ -166,6 +196,30 @@ async def list_meetings(db: Session = Depends(get_db)):
     return meetings
 
 
+@app.get("/meetings/{meeting_id}", status_code=200)
+async def get_meeting(meeting_id: int, db: Session = Depends(get_db)):
+    """Get a single meeting by ID."""
+    from app.models import Meeting
+    meeting = db.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return meeting
+
+
+@app.delete("/meetings/{meeting_id}", status_code=200)
+async def delete_meeting(meeting_id: int, db: Session = Depends(get_db)):
+    """Delete a meeting and clean up associated calendar events."""
+    from app.models import Meeting, CalendarEvent
+    from sqlalchemy import delete as sa_delete
+    meeting = db.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    db.execute(sa_delete(CalendarEvent).where(CalendarEvent.source_meeting_id == meeting_id))
+    db.delete(meeting)
+    db.commit()
+    return {"message": "Meeting deleted successfully", "id": meeting_id}
+
+
 @app.post("/meetings", status_code=201)
 async def save_meeting(data: dict, db: Session = Depends(get_db)):
     """Save a processed meeting, resolve completed calendar tasks, and auto-assign action items."""
@@ -173,15 +227,36 @@ async def save_meeting(data: dict, db: Session = Depends(get_db)):
     from app.services.work_resolver import detect_work_resolutions
     from sqlalchemy import select as sa_select
     
-    # 1. Save Meeting
-    processed_data_dict = data.get("processed_data", {})
+    # 1. Normalize and Save Meeting
+    raw_processed = data.get("processed_data", {})
+    if isinstance(raw_processed, str):
+        try:
+            processed_data_dict = json.loads(raw_processed)
+        except Exception:
+            processed_data_dict = {}
+    elif isinstance(raw_processed, dict):
+        processed_data_dict = raw_processed
+    else:
+        processed_data_dict = {}
+
+    raw_speakers = data.get("speakers", [])
+    if isinstance(raw_speakers, str):
+        try:
+            speakers_list = json.loads(raw_speakers)
+        except Exception:
+            speakers_list = [raw_speakers] if raw_speakers else []
+    elif isinstance(raw_speakers, list):
+        speakers_list = raw_speakers
+    else:
+        speakers_list = []
+
     transcript_text = data.get("transcript", "")
     meeting_title = data.get("title", "Untitled Meeting")
 
     db_meeting = Meeting(
         title=meeting_title,
         word_count=data.get("word_count", 0),
-        speakers=json.dumps(data.get("speakers", [])),
+        speakers=json.dumps(speakers_list),
         transcript=transcript_text,
         processed_data=json.dumps(processed_data_dict)
     )
@@ -227,27 +302,76 @@ async def save_meeting(data: dict, db: Session = Depends(get_db)):
         )
         resolved_event_ids.add(event_id)
 
-    # 3. Auto-assign Action Items to Calendar (skip if this new action item immediately duplicates a resolved one)
+    # 3. Auto-assign Action Items to Calendar
     for item in action_items:
-        deadline = item.get("deadline")
-        if not deadline or deadline.lower() in ["tbd", "unknown", "none", "-"]:
+        deadline = item.get("deadline") or item.get("when")
+        if not deadline or str(deadline).lower() in ["tbd", "unknown", "none", "-"]:
             deadline = (datetime.datetime.now() + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
         
+        # Clean any [UNRESOLVED] prefix from calendar date
+        clean_deadline = str(deadline).replace("[UNRESOLVED]", "").strip()
+        if not clean_deadline:
+            clean_deadline = (datetime.datetime.now() + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+
+        prio = str(item.get("priority") or "MEDIUM").strip().upper()
+        if prio not in ["HIGH", "MEDIUM", "LOW"]:
+            prio = "MEDIUM"
+
         event_data = CalendarEventCreate(
-            title=item.get("task", "Unnamed Task"),
+            title=(item.get("task") or item.get("what") or "Unnamed Task").strip() or "Unnamed Task",
             description=f"Action item from meeting: {db_meeting.title}",
-            date=deadline,
-            owner=item.get("owner", "Unassigned"),
-            priority=item.get("priority", "MEDIUM"),
+            date=clean_deadline,
+            owner=(item.get("owner") or item.get("who") or "Unassigned").strip() or "Unassigned",
+            priority=prio,
             source_meeting_id=db_meeting.id,
             status="ACTIVE"
         )
         crud.create_calendar_event(db, event_data)
 
+    # 4. Ingest into Relational Knowledge Layer
+    from app.services.knowledge_service import sync_meeting_to_knowledge_graph
+    from app.services.structured_extractor import extract_structured_report
+    structured_report = extract_structured_report(transcript_text)
+
+    sync_meeting_to_knowledge_graph(
+        db=db,
+        meeting_id=db_meeting.id,
+        meeting_title=meeting_title,
+        speakers=speakers_list,
+        structured_report=structured_report,
+        resolutions=detected_resolutions
+    )
+
     return {
-        "meeting": db_meeting,
+        "meeting": {
+            "id": db_meeting.id,
+            "title": db_meeting.title,
+            "date": db_meeting.date.isoformat() if hasattr(db_meeting.date, "isoformat") else str(db_meeting.date or ""),
+            "word_count": db_meeting.word_count,
+            "speakers": db_meeting.speakers,
+            "transcript": db_meeting.transcript,
+            "processed_data": db_meeting.processed_data,
+        },
         "resolutions": detected_resolutions
     }
+
+
+# Knowledge Graph Endpoints
+@app.get("/knowledge/entities")
+async def list_entities(type: str | None = None, limit: int = 100, db: Session = Depends(get_db)):
+    """List knowledge entities with their connection counts."""
+    from app.services.knowledge_service import list_knowledge_entities
+    return list_knowledge_entities(db=db, entity_type=type, limit=limit)
+
+
+@app.get("/knowledge/entity/{entity_id}")
+async def get_entity_connections(entity_id: int, db: Session = Depends(get_db)):
+    """Get an entity with all its connected neighbors and verbatim evidence."""
+    from app.services.knowledge_service import get_connected_knowledge
+    result = get_connected_knowledge(db=db, entity_id=entity_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return result
 
 
 # Calendar Endpoints
@@ -271,10 +395,11 @@ async def create_calendar_event(event: CalendarEventCreate, db: Session = Depend
 @app.patch("/calendar/{event_id}/resolve", response_model=CalendarEventResponse)
 async def resolve_calendar_event(
     event_id: int, 
-    body: dict, 
+    body: dict | None = None, 
     db: Session = Depends(get_db)
 ):
     """Resolve an event with explicit reasoning."""
+    body = body or {}
     reason = body.get("reason", "Resolved based on meeting update.")
     status = body.get("status", "RESOLVED")
     updated = crud.resolve_calendar_event(db, event_id, reason=reason, status=status)
@@ -316,16 +441,24 @@ async def sync_calendar_from_meetings(db: Session = Depends(get_db)):
 
         action_items = processed_data_dict.get("action_items", [])
         for item in action_items:
-            deadline = item.get("deadline")
+            deadline = item.get("deadline") or item.get("when")
             if not deadline or str(deadline).lower() in ["tbd", "unknown", "none", "-"]:
                 deadline = (datetime.datetime.now() + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
 
+            clean_deadline = str(deadline).replace("[UNRESOLVED]", "").strip()
+            if not clean_deadline:
+                clean_deadline = (datetime.datetime.now() + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+
+            prio = str(item.get("priority") or "MEDIUM").strip().upper()
+            if prio not in ["HIGH", "MEDIUM", "LOW"]:
+                prio = "MEDIUM"
+
             event_data = CalendarEventCreate(
-                title=item.get("task", "Unnamed Task"),
+                title=(item.get("task") or item.get("what") or "Unnamed Task").strip() or "Unnamed Task",
                 description=f"Action item from meeting: {meeting.title}",
-                date=deadline,
-                owner=item.get("owner", "Unassigned"),
-                priority=item.get("priority", "MEDIUM"),
+                date=clean_deadline,
+                owner=(item.get("owner") or item.get("who") or "Unassigned").strip() or "Unassigned",
+                priority=prio,
                 source_meeting_id=meeting.id
             )
             crud.create_calendar_event(db, event_data)
@@ -336,7 +469,12 @@ async def sync_calendar_from_meetings(db: Session = Depends(get_db)):
 # Mount the static frontend. Resolved from the package location so the app
 # boots regardless of the working directory (e.g. `cd src && uvicorn ...`).
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+if FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+else:
+    @app.get("/")
+    async def root():
+        return {"name": settings.app_name, "status": "healthy", "docs": "/docs"}
 
 if __name__ == "__main__":
     import uvicorn

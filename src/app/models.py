@@ -50,3 +50,42 @@ class CalendarEvent(Base):
 
     def __repr__(self) -> str:
         return f"<CalendarEvent(id={self.id}, title={self.title}, date={self.date})>"
+
+
+class KnowledgeEntity(Base):
+    """KnowledgeEntity model representing a node (Person, Decision, Task, Blocker, Topic)."""
+
+    __tablename__ = "knowledge_entities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    entity_type: Mapped[str] = mapped_column(String(50), index=True, nullable=False)  # PERSON, DECISION, TASK, BLOCKER, TOPIC
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    canonical_name: Mapped[str] = mapped_column(String(500), index=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_meeting_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string for extra attributes (priority, confidence, etc.)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<KnowledgeEntity(id={self.id}, type={self.entity_type}, name={self.name})>"
+
+
+class KnowledgeRelationship(Base):
+    """KnowledgeRelationship model representing a directed edge with provenance and evidence."""
+
+    __tablename__ = "knowledge_relationships"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    target_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(50), index=True, nullable=False)  # OWNS, DECIDED_IN, RAISED_IN, BLOCKS, RESOLVES, PARTICIPATED_IN
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)  # Verbatim quote anchoring this relationship
+    source_meeting_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<KnowledgeRelationship(id={self.id}, {self.source_id}-[{self.relation_type}]->{self.target_id})>"

@@ -174,7 +174,7 @@ def _answer_what_query(query: str, chunks: list[dict]) -> str:
             chunk["full_chunk"], re.IGNORECASE,
         )
     if answers:
-        return "Based on the transcripts: {}.".format("; ".join(set(answers))[:3])
+        return "Based on the transcripts: {}.".format("; ".join(sorted(set(answers))[:3]))
     return "Based on the transcripts: {}".format(chunks[0]["snippet"]) if chunks else (
         "The information is not available."
     )

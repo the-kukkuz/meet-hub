@@ -1,7 +1,10 @@
 /* ════════════════════════════════════════════
    MeetHub — Full Operational Logic
    ════════════════════════════════════════════ */
-const API = 'http://127.0.0.1:8000';
+// Ensure API connects to backend on port 8000 even if opened via file:// or Live Server
+const API = (window.location.protocol === 'file:' || (window.location.port && window.location.port !== '8000'))
+  ? 'http://localhost:8000'
+  : window.location.origin;
 
 // ─── State ───
 const state = {
@@ -10,6 +13,18 @@ const state = {
   uploadedFiles: [],
   report: null,
 };
+
+// ─── Safe JSON Helper ───
+function safeJsonParse(val, fallback = {}) {
+  if (val === null || val === undefined) return fallback;
+  if (typeof val === 'object') return val;
+  try {
+    const parsed = JSON.parse(val);
+    return parsed !== null && parsed !== undefined ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 // ─── DOM Helpers ───
 const $ = (id) => document.getElementById(id);
@@ -24,6 +39,9 @@ function switchView(viewName) {
     loadMeetings();
   } else if (viewName === 'calendar-section') {
     renderGlobalCalendar();
+  } else if (viewName === 'knowledge') {
+    initKnowledgeGraphEvents();
+    loadKnowledgeEntities();
   }
 }
 
@@ -53,9 +71,36 @@ async function apiPost(path, body) {
   return res.json();
 }
 
+async function apiPatch(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
+async function apiDelete(path) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
 async function apiGet(path) {
   const res = await fetch(`${API}${path}`);
-  if (!res.ok) throw new Error('Fetch failed');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Fetch failed (${res.status})`);
+  }
   return res.json();
 }
 
@@ -80,8 +125,8 @@ function toast(message, type = 'info') {
 async function loadMeetings() {
   try {
     const meetings = await apiGet('/meetings');
-    state.meetings = meetings;
-    renderDashboard(meetings);
+    state.meetings = Array.isArray(meetings) ? meetings : [];
+    renderDashboard(state.meetings);
   } catch (err) {
     toast('Error loading dashboard: ' + err.message, 'error');
   }
@@ -91,19 +136,31 @@ function renderDashboard(meetings) {
   const grid = $('meeting-grid');
   grid.innerHTML = '';
   
-  if (meetings.length === 0) {
+  if (!meetings || meetings.length === 0) {
     grid.innerHTML = '<div class="empty-state">No meetings processed yet. Click "Add Meeting" to start.</div>';
+    $('global-stats').innerHTML = `
+      <div class="stat-mini"><span>0</span> Meetings</div>
+      <div class="stat-mini"><span>0</span> Action Items</div>
+    `;
     return;
   }
 
+  let totalActions = 0;
+
   meetings.forEach(m => {
+    const speakers = safeJsonParse(m.speakers, []);
+    const procData = safeJsonParse(m.processed_data, {});
+    const actionItems = Array.isArray(procData.action_items) ? procData.action_items : [];
+    const speakerCount = Array.isArray(speakers) ? speakers.length : 0;
+    totalActions += actionItems.length;
+
     const card = document.createElement('div');
     card.className = 'meeting-card';
     card.innerHTML = `
-      <h3>${m.title}</h3>
-      <div class="card-meta">📅 ${new Date(m.date).toLocaleDateString()} • 🔊 ${JSON.parse(m.speakers).length} Speakers</div>
+      <h3>${escapeHtml(m.title)}</h3>
+      <div class="card-meta">📅 ${new Date(m.date).toLocaleDateString()} • 🔊 ${speakerCount} Speakers</div>
       <div class="card-stats">
-        <span>${JSON.parse(m.processed_data).action_items.length} Action Items</span>
+        <span>${actionItems.length} Action Items</span>
       </div>
       <button class="btn-card-view" data-id="${m.id}">View Results</button>
     `;
@@ -113,7 +170,6 @@ function renderDashboard(meetings) {
     grid.appendChild(card);
   });
 
-  const totalActions = meetings.reduce((acc, m) => acc + JSON.parse(m.processed_data).action_items.length, 0);
   $('global-stats').innerHTML = `
     <div class="stat-mini"><span>${meetings.length}</span> Meetings</div>
     <div class="stat-mini"><span>${totalActions}</span> Action Items</div>
@@ -537,7 +593,45 @@ function openDayModal(date, itemsForDay) {
             ${escapeHtml(item.event.resolution_reason)}
           </div>
         ` : ''}
+        <div style="margin-top:10px; display:flex; gap:8px;">
+          ${!isResolved ? `<button class="btn-small btn-resolve-task" data-id="${item.event.id}" style="cursor:pointer;">✓ Resolve</button>` : ''}
+          <button class="btn-small btn-delete-task" data-id="${item.event.id}" style="cursor:pointer; background:#5c1d1d; color:#fff;">Delete</button>
+        </div>
       `;
+
+      const btnResolve = card.querySelector('.btn-resolve-task');
+      if (btnResolve) {
+        btnResolve.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await apiPatch(`/calendar/${item.event.id}/resolve`, {
+              reason: 'Manually marked as resolved in calendar view.',
+              status: 'RESOLVED'
+            });
+            toast('Task resolved!', 'success');
+            closeDayModal();
+            renderGlobalCalendar();
+          } catch (err) {
+            toast('Failed to resolve task: ' + err.message, 'error');
+          }
+        });
+      }
+
+      const btnDelete = card.querySelector('.btn-delete-task');
+      if (btnDelete) {
+        btnDelete.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await apiDelete(`/calendar/${item.event.id}`);
+            toast('Task deleted!', 'success');
+            closeDayModal();
+            renderGlobalCalendar();
+          } catch (err) {
+            toast('Failed to delete task: ' + err.message, 'error');
+          }
+        });
+      }
+
       bodyEl.appendChild(card);
     });
   }
@@ -807,8 +901,9 @@ fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 function handleFiles(files) {
   const list = $('file-list');
   for (const file of files) {
-    if (!file.name.endsWith('.txt') && !file.name.endsWith('.vtt')) {
-      toast(`${file.name} is not a supported format. Use .txt or .vtt.`, 'error');
+    const nameLower = file.name.toLowerCase();
+    if (!nameLower.endsWith('.txt') && !nameLower.endsWith('.vtt') && !nameLower.endsWith('.md')) {
+      toast(`${file.name} is not a supported format. Use .txt, .vtt, or .md.`, 'error');
       continue;
     }
     state.uploadedFiles.push(file);
@@ -858,8 +953,11 @@ $('btn-submit').addEventListener('click', async () => {
           speaker_summary: sentimentData.speaker_summary,
         });
 
+        const titleMatch = transcript.match(/^\s*(?:meeting|agenda|topic|title)\s*[:\-]\s*(.+)$/im);
+        const detectedTitle = titleMatch ? titleMatch[1].trim() : (extractData.decisions && extractData.decisions[0] ? extractData.decisions[0].text : `Meeting ${new Date().toLocaleDateString()}`);
+
         const meetingObject = {
-          title: `Project Analysis ${new Date().toLocaleTimeString()}`,
+          title: detectedTitle,
           transcript: transcript,
           word_count: processData.metadata.word_count,
           speakers: processData.metadata.speakers,
@@ -1070,19 +1168,21 @@ $('btn-copy-json').addEventListener('click', async () => {
 // ─── Detail View ───
 function showMeetingDetail(m) {
   state.currentMeeting = m;
-  const data = JSON.parse(m.processed_data);
-  const speakersArr = JSON.parse(m.speakers);
+  const data = safeJsonParse(m.processed_data, {});
+  const speakersArr = safeJsonParse(m.speakers, []);
+  const summary = data.summary || {};
+  const actionItems = Array.isArray(data.action_items) ? data.action_items : [];
 
-  $('meeting-title').textContent = m.title;
-  $('meeting-meta').textContent = `${new Date(m.date).toLocaleDateString()} • ${m.word_count} Words • ${speakersArr.length} Speakers`;
+  $('meeting-title').textContent = m.title || 'Untitled Meeting';
+  $('meeting-meta').textContent = `${new Date(m.date).toLocaleDateString()} • ${m.word_count || 0} Words • ${speakersArr.length} Speakers`;
   
   // Render Main Points
   const hList = $('main-points-list');
   hList.innerHTML = '';
   const highlights = [
-    { label: 'Key Decision', value: data.summary.key_decision },
-    { label: 'Urgent Action', value: data.summary.urgent_action },
-    { label: 'Vibe', value: data.summary.overall_sentiment }
+    { label: 'Key Decision', value: summary.key_decision },
+    { label: 'Urgent Action', value: summary.urgent_action },
+    { label: 'Vibe', value: summary.overall_sentiment }
   ];
   highlights.forEach(h => {
     if (!h.value) return;
@@ -1095,22 +1195,32 @@ function showMeetingDetail(m) {
   // Render Work
   const workBody = $('work-body');
   workBody.innerHTML = '';
-  data.action_items.forEach(a => {
+  if (actionItems.length === 0) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${a.task}</td><td>${a.owner}</td><td>${a.deadline || '-'}</td>`;
+    tr.innerHTML = `<td colspan="3" style="text-align:center; opacity:0.6;">No action items recorded for this meeting.</td>`;
     workBody.appendChild(tr);
-  });
+  } else {
+    actionItems.forEach(a => {
+      const tr = document.createElement('tr');
+      const task = a.task || a.what || 'Unnamed task';
+      const owner = a.owner || a.who || 'Unassigned';
+      const when = a.deadline || a.when || '-';
+      tr.innerHTML = `<td>${escapeHtml(task)}</td><td>${escapeHtml(owner)}</td><td>${escapeHtml(when)}</td>`;
+      workBody.appendChild(tr);
+    });
+  }
 
   // Render Sentiment Chart (Simplified color bars)
   const timeline = $('sentiment-timeline');
   timeline.innerHTML = '';
-  if (data.sentiment && data.sentiment.timeline) {
+  if (data.sentiment && Array.isArray(data.sentiment.timeline)) {
     data.sentiment.timeline.forEach(t => {
       const bar = document.createElement('div');
-      bar.className = `sentiment-bar ${t.sentiment.toLowerCase()}`;
-      bar.title = `${t.speaker}: ${t.sentiment}`;
+      const sent = (t.sentiment || 'Neutral').toLowerCase();
+      bar.className = `sentiment-bar ${sent}`;
+      bar.title = `${t.speaker || 'Speaker'}: ${t.sentiment || 'Neutral'}`;
       bar.addEventListener('click', () => {
-        toast(`${t.speaker}: "${t.segment}"`);
+        toast(`${t.speaker || 'Speaker'}: "${t.segment || ''}"`);
       });
       timeline.appendChild(bar);
     });
@@ -1120,11 +1230,17 @@ function showMeetingDetail(m) {
   const sSentiment = $('speakers-sentiment');
   sSentiment.innerHTML = '';
   if (data.sentiment && data.sentiment.speaker_summary) {
-    Object.keys(data.sentiment.speaker_summary).forEach(s => {
-        const badge = document.createElement('div');
-        badge.className = 'speaker-sentiment-badge';
-        badge.innerHTML = `<strong>${s}</strong>: ${data.sentiment.speaker_summary[s]}`;
-        sSentiment.appendChild(badge);
+    const list = Array.isArray(data.sentiment.speaker_summary)
+      ? data.sentiment.speaker_summary
+      : Object.values(data.sentiment.speaker_summary);
+    list.forEach(item => {
+      const spk = item.speaker || 'Unknown';
+      const sent = item.overall_sentiment || 'Neutral';
+      const tone = item.dominant_tone ? ` (${item.dominant_tone})` : '';
+      const badge = document.createElement('div');
+      badge.className = 'speaker-sentiment-badge';
+      badge.innerHTML = `<strong>${escapeHtml(spk)}</strong>: ${escapeHtml(sent)}${escapeHtml(tone)}`;
+      sSentiment.appendChild(badge);
     });
   }
 
@@ -1142,11 +1258,25 @@ $('btn-chat').addEventListener('click', async () => {
   $('chat-input').value = '';
 
   try {
+    if (!state.currentMeeting) {
+      appendMessage('bot', 'No meeting selected. Please view a meeting first.');
+      return;
+    }
+    const currentData = safeJsonParse(state.currentMeeting.processed_data, {});
+    const summaryData = currentData.summary || {};
+    const contextList = [summaryData.key_decision, state.currentMeeting.transcript].filter(Boolean);
     const res = await apiPost('/meetings/query', { 
       query, 
-      context: [JSON.parse(state.currentMeeting.processed_data).summary.key_decision, state.currentMeeting.transcript] 
+      context: contextList.length ? contextList : [state.currentMeeting.transcript || ""] 
     });
-    appendMessage('bot', res.answer);
+    let answerText = res.answer || "No response received.";
+    if (res.sources && res.sources.length > 0) {
+      const sourcesText = res.sources
+        .map(s => `• [${s.meeting}] "${s.snippet}"`)
+        .join('\n');
+      answerText += `\n\nSources:\n${sourcesText}`;
+    }
+    appendMessage('bot', answerText);
   } catch (err) {
     appendMessage('bot', 'Error contacting intelligence: ' + err.message);
   }
@@ -1164,10 +1294,15 @@ function appendMessage(sender, text) {
 // ─── Export Logic ───
 $('btn-export').addEventListener('click', () => {
   if (!state.currentMeeting) return;
-  const data = JSON.parse(state.currentMeeting.processed_data);
+  const data = safeJsonParse(state.currentMeeting.processed_data, {});
+  const actionItems = Array.isArray(data.action_items) ? data.action_items : [];
   let csv = 'Task,Owner,Deadline,Priority\n';
-  data.action_items.forEach(a => {
-    csv += `"${a.task}","${a.owner}","${a.deadline || ''}","${a.priority}"\n`;
+  actionItems.forEach(a => {
+    const task = a.task || a.what || '';
+    const owner = a.owner || a.who || '';
+    const deadline = a.deadline || a.when || '';
+    const priority = a.priority || 'MEDIUM';
+    csv += `"${task}","${owner}","${deadline}","${priority}"\n`;
   });
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
@@ -1176,6 +1311,216 @@ $('btn-export').addEventListener('click', () => {
   a.download = `meeting_actions_${state.currentMeeting.id}.csv`;
   a.click();
 });
+
+// ─── Knowledge Graph & Entity Explorer ───
+let kgState = {
+  entities: [],
+  activeTypeFilter: '',
+  searchQuery: '',
+  selectedEntityId: null,
+  initialized: false
+};
+
+function initKnowledgeGraphEvents() {
+  if (kgState.initialized) return;
+
+  const filterContainer = $('kg-type-filters');
+  if (filterContainer) {
+    filterContainer.addEventListener('click', (e) => {
+      const pill = e.target.closest('.kg-pill');
+      if (!pill) return;
+
+      filterContainer.querySelectorAll('.kg-pill').forEach(b => b.classList.remove('active'));
+      pill.classList.add('active');
+
+      kgState.activeTypeFilter = pill.dataset.type || '';
+      loadKnowledgeEntities(kgState.activeTypeFilter, kgState.searchQuery);
+    });
+  }
+
+  const searchInput = $('kg-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      kgState.searchQuery = e.target.value.trim();
+      renderKnowledgeEntityList();
+    });
+  }
+
+  kgState.initialized = true;
+}
+
+function getEntityBadgeClass(type) {
+  const normalized = (type || '').toLowerCase();
+  if (['person', 'decision', 'task', 'blocker', 'meeting'].includes(normalized)) {
+    return `entity-badge ${normalized}`;
+  }
+  return 'entity-badge';
+}
+
+async function loadKnowledgeEntities(typeFilter = kgState.activeTypeFilter, searchQuery = kgState.searchQuery) {
+  kgState.activeTypeFilter = typeFilter;
+  kgState.searchQuery = searchQuery;
+
+  const listEl = $('kg-entity-list');
+  if (!listEl) return;
+
+  try {
+    const queryParam = typeFilter ? `?type=${encodeURIComponent(typeFilter)}` : '';
+    const data = await apiGet(`/knowledge/entities${queryParam}`);
+    kgState.entities = Array.isArray(data) ? data : [];
+    renderKnowledgeEntityList();
+
+    if (kgState.entities.length > 0 && !kgState.selectedEntityId) {
+      inspectEntity(kgState.entities[0].id);
+    }
+  } catch (err) {
+    listEl.innerHTML = `<div class="empty-state">Failed to load knowledge entities.</div>`;
+    toast('Could not load knowledge graph entities', 'error');
+  }
+}
+
+function renderKnowledgeEntityList() {
+  const listEl = $('kg-entity-list');
+  const countEl = $('kg-entity-count');
+  if (!listEl) return;
+
+  const q = (kgState.searchQuery || '').toLowerCase();
+  const filtered = kgState.entities.filter(ent => {
+    if (!q) return true;
+    const nameMatch = (ent.name || '').toLowerCase().includes(q);
+    const descMatch = (ent.description || '').toLowerCase().includes(q);
+    return nameMatch || descMatch;
+  });
+
+  if (countEl) countEl.textContent = String(filtered.length);
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = `<div class="empty-state">No matching entities found.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(ent => {
+    const isSelected = ent.id === kgState.selectedEntityId ? 'selected' : '';
+    const badgeClass = getEntityBadgeClass(ent.type);
+    const connCount = ent.connection_count ?? 0;
+    const descHtml = ent.description
+      ? `<div class="kg-card-desc">${escapeHtml(ent.description)}</div>`
+      : '';
+
+    return `
+      <button type="button" class="kg-entity-card ${isSelected}" data-entity-id="${ent.id}" onclick="inspectEntity(${ent.id})">
+        <div class="kg-card-main">
+          <div class="kg-card-title-row">
+            <span class="${badgeClass}">${escapeHtml(ent.type)}</span>
+            <span class="kg-card-name">${escapeHtml(ent.name)}</span>
+          </div>
+          ${descHtml}
+        </div>
+        <span class="kg-conn-pill">${connCount} ${connCount === 1 ? 'edge' : 'edges'}</span>
+      </button>
+    `;
+  }).join('');
+}
+
+async function inspectEntity(entityId) {
+  if (!entityId) return;
+  kgState.selectedEntityId = Number(entityId);
+
+  document.querySelectorAll('.kg-entity-card').forEach(card => {
+    card.classList.toggle('selected', Number(card.dataset.entityId) === kgState.selectedEntityId);
+  });
+
+  const inspectorEl = $('kg-inspector');
+  if (!inspectorEl) return;
+
+  inspectorEl.innerHTML = `<div class="loading-mini">Loading entity connections...</div>`;
+
+  try {
+    const payload = await apiGet(`/knowledge/entity/${encodeURIComponent(entityId)}`);
+    if (!payload || !payload.entity) {
+      inspectorEl.innerHTML = `<div class="empty-state">Entity not found.</div>`;
+      return;
+    }
+
+    const { entity, connections = [] } = payload;
+    const badgeClass = getEntityBadgeClass(entity.type);
+
+    const metadataEntries = entity.metadata && typeof entity.metadata === 'object'
+      ? Object.entries(entity.metadata).filter(([_, v]) => v !== null && v !== undefined && v !== '')
+      : [];
+
+    const metadataHtml = metadataEntries.length > 0
+      ? `<div class="kg-meta-grid">
+          ${metadataEntries.map(([k, v]) => `
+            <span class="kg-meta-tag">
+              <span class="kg-meta-key">${escapeHtml(k)}:</span>${escapeHtml(String(v))}
+            </span>
+          `).join('')}
+        </div>`
+      : '';
+
+    const descriptionHtml = entity.description
+      ? `<p class="kg-inspector-desc">${escapeHtml(entity.description)}</p>`
+      : '';
+
+    const edgesHtml = connections.length === 0
+      ? `<div class="empty-state">No recorded relationships for this entity.</div>`
+      : `<div class="kg-edges-list">
+          ${connections.map(conn => {
+            const isOutgoing = conn.direction === 'OUTGOING';
+            const arrow = isOutgoing ? '&rarr;' : '&larr;';
+            const dirLabel = isOutgoing ? 'Outgoing to' : 'Incoming from';
+            const target = conn.connected_entity || {};
+            const targetBadge = getEntityBadgeClass(target.type);
+            const evidenceText = conn.evidence
+              ? `<blockquote class="kg-evidence-quote">“${escapeHtml(conn.evidence)}”</blockquote>`
+              : `<blockquote class="kg-evidence-quote" style="opacity:0.6;">No verbatim quote recorded.</blockquote>`;
+            const meetingFooter = conn.source_meeting_id
+              ? `<div class="kg-evidence-meta">Source Meeting #${escapeHtml(String(conn.source_meeting_id))}</div>`
+              : '';
+
+            return `
+              <div class="kg-edge-card">
+                <div class="kg-edge-top">
+                  <span class="kg-rel-pill">${escapeHtml(conn.relation_type)}</span>
+                  <span class="kg-dir-arrow" title="${dirLabel}">${arrow}</span>
+                  <button 
+                    type="button" 
+                    class="kg-target-link" 
+                    onclick="inspectEntity(${Number(target.id)})"
+                    title="Inspect ${escapeHtml(target.name || '')}"
+                  >
+                    <span class="${targetBadge}">${escapeHtml(target.type || '')}</span>
+                    <span>${escapeHtml(target.name || 'Unknown')}</span>
+                  </button>
+                </div>
+                ${evidenceText}
+                ${meetingFooter}
+              </div>
+            `;
+          }).join('')}
+        </div>`;
+
+    inspectorEl.innerHTML = `
+      <div class="kg-inspector-header">
+        <span class="${badgeClass}">${escapeHtml(entity.type)}</span>
+        <h3 class="kg-inspector-title">${escapeHtml(entity.name)}</h3>
+        ${descriptionHtml}
+        ${metadataHtml}
+      </div>
+      <div>
+        <div class="kg-panel-header" style="margin: 0 -20px 12px -20px; padding: 10px 20px;">
+          <span>Connected Knowledge & Evidence</span>
+          <span class="kg-count-badge">${connections.length}</span>
+        </div>
+        ${edgesHtml}
+      </div>
+    `;
+  } catch (err) {
+    inspectorEl.innerHTML = `<div class="empty-state">Error loading entity details.</div>`;
+    toast('Failed to load entity details', 'error');
+  }
+}
 
 // ─── Init ───
 loadMeetings();

@@ -217,8 +217,8 @@ def analyze_cross_meeting_query(
 
     sources = [
         {
-            "meeting": meeting.get("meeting_id", f"Meeting_{idx + 1}"),
-            "date": meeting.get("date", "Unknown"),
+            "meeting": str(meeting.get("title") or meeting.get("meeting_id") or f"Meeting_{idx + 1}"),
+            "date": str(meeting.get("date") or "Unknown"),
             "snippet": _extract_relevant_snippet(query, meeting),
         }
         for idx, meeting in enumerate(relevant_meetings)
@@ -398,17 +398,23 @@ def _generate_cross_meeting_insights(meetings: list[dict]) -> str:
         insights.append("Team members involved: " + ", ".join(sorted(all_assignees)))
 
     # FIX (Bug L): sort dates chronologically before building span string
-    raw_dates = [m.get("date", "") for m in meetings if m.get("date")]
+    raw_dates = [str(m.get("date", "")) for m in meetings if m.get("date")]
     if len(raw_dates) >= 2:
+        def _parse_mdate(d_str: str):
+            clean = str(d_str).split()[0].split("T")[0]
+            try:
+                return datetime.strptime(clean, "%Y-%m-%d")
+            except Exception:
+                return datetime.min
+
         try:
-            sorted_dates = sorted(
-                raw_dates,
-                key=lambda d: datetime.strptime(d, "%Y-%m-%d"),
-            )
+            sorted_dates = sorted(raw_dates, key=_parse_mdate)
+            d_start = sorted_dates[0].split()[0].split("T")[0]
+            d_end = sorted_dates[-1].split()[0].split("T")[0]
             insights.append(
-                "Meetings span from {} to {}".format(sorted_dates[0], sorted_dates[-1])
+                "Meetings span from {} to {}".format(d_start, d_end)
             )
-        except ValueError:
+        except Exception:
             insights.append(
                 "Meetings span from {} to {}".format(raw_dates[0], raw_dates[-1])
             )

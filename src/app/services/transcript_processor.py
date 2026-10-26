@@ -28,14 +28,16 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 from difflib import SequenceMatcher
-import spacy
-
 try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import spacy.cli
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+    import spacy
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        import spacy.cli
+        spacy.cli.download("en_core_web_sm")
+        nlp = spacy.load("en_core_web_sm")
+except (ImportError, Exception):
+    nlp = None
 
 
 # ---------------------------------------------------------------------------
@@ -150,12 +152,13 @@ def _resolve_deadline(raw: str, meeting_date: Optional[str]) -> str:
             
     # NLP fallback for finding exact dates in vague strings
     try:
-        doc = nlp(raw_stripped)
-        for ent in doc.ents:
-            if ent.label_ == "DATE":
-                # Just flag it with the extracted date text for human review, since spacy date strings are varied
-                return f"[UNRESOLVED] NLP extracted: {ent.text}"
-    except NameError:
+        if nlp is not None:
+            doc = nlp(raw_stripped)
+            for ent in doc.ents:
+                if ent.label_ == "DATE":
+                    # Just flag it with the extracted date text for human review, since spacy date strings are varied
+                    return f"[UNRESOLVED] NLP extracted: {ent.text}"
+    except Exception:
         pass
 
     return f"[UNRESOLVED] {raw.strip()}"
@@ -474,16 +477,17 @@ def extract_action_items(
         # but the line sounds like a task due to action verbs, try finding a PERSON with spaCy.
         if "will " in line_clean.lower() or "needs to " in line_clean.lower():
             try:
-                doc = nlp(line_clean)
-                people = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
-                if people:
-                    person = next((p for p in people if any(p.lower() in s.lower() for s in speakers)), people[0])
-                    # Ensure not already assigned
-                    already_handled = any(person in t['who'] and _similarity(t['what'], line_clean) > 0.5 for t in action_items)
-                    if not already_handled:
-                        what_str = re.sub(r"^[A-Z][a-zA-Z0-9\s\.\-']+?:\s*", '', line_clean)
-                        _save_item(action_items, seen_items, person, what_str, lines, i, meeting_date)
-            except NameError:
+                if nlp is not None:
+                    doc = nlp(line_clean)
+                    people = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
+                    if people:
+                        person = next((p for p in people if any(p.lower() in s.lower() for s in speakers)), people[0])
+                        # Ensure not already assigned
+                        already_handled = any(person in t['who'] and _similarity(t['what'], line_clean) > 0.5 for t in action_items)
+                        if not already_handled:
+                            what_str = re.sub(r"^[A-Z][a-zA-Z0-9\s\.\-']+?:\s*", '', line_clean)
+                            _save_item(action_items, seen_items, person, what_str, lines, i, meeting_date)
+            except Exception:
                 pass
 
     return action_items

@@ -82,10 +82,10 @@ def _find_urgent_action(action_items: list[dict]) -> Optional[str]:
 
     scored: list[tuple[int, dict]] = []
     for action in action_items:
-        # FIX (Bug Q): accept both key naming conventions
+        # Accept both key naming conventions (who/owner, what/task, when/deadline)
         who = action.get("who") or action.get("owner") or ""
         what = action.get("what") or action.get("task") or ""
-        when = action.get("when") or ""
+        when = action.get("when") or action.get("deadline") or ""
         text = "{} {} {}".format(who, what, when).lower()
         score = sum(w for kw, w in time_sensitivity.items() if kw in text)
         scored.append((score, action))
@@ -94,7 +94,7 @@ def _find_urgent_action(action_items: list[dict]) -> Optional[str]:
     best = scored[0][1]
     who = best.get("who") or best.get("owner") or "Unknown"
     what = best.get("what") or best.get("task") or ""
-    when = best.get("when")
+    when = best.get("when") or best.get("deadline")
     result = "{}: {}".format(who, what)
     if when:
         result += " (deadline: {})".format(when)
